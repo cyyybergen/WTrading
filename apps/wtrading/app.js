@@ -169,13 +169,13 @@
 		let t2;
 		if (phase === 'low') {
 			// downward crossing of +1 (type === 'high' means crossed downward)
-			const c = positiveCrossings.find(x => x.index > t0 && x.type === 'high');
-			t2 = c ? c.index : findNearestToValue(diff, t0 + 1, maxDiffIdx, DIFF_LEVEL);
+			const downwardCrossing = positiveCrossings.find(x => x.index > t0 && x.type === 'high');
+			t2 = downwardCrossing ? downwardCrossing.index : findNearestToValue(diff, t0 + 1, maxDiffIdx, DIFF_LEVEL);
 		} else {
 			// upward crossing of −1 (type === 'low' means crossed upward through −DIFF_LEVEL)
-			const neg = findThresholdCrossings(diff, -DIFF_LEVEL);
-			const c = neg.find(x => x.index > t0 && x.type === 'low');
-			t2 = c ? c.index : findNearestToValue(diff, t0 + 1, maxDiffIdx, -DIFF_LEVEL);
+			const negativeCrossings = findThresholdCrossings(diff, -DIFF_LEVEL);
+			const upwardCrossing = negativeCrossings.find(x => x.index > t0 && x.type === 'low');
+			t2 = upwardCrossing ? upwardCrossing.index : findNearestToValue(diff, t0 + 1, maxDiffIdx, -DIFF_LEVEL);
 		}
 		return t2 <= t0 ? clampIndex(t0 + 1, maxDiffIdx) : t2;
 	}
