@@ -39,6 +39,21 @@
 			<div class="card-header">
 				<h2>Kurschart</h2>
 				<div class="toggles">
+					<label class="win-select">
+						<span class="toggle-label">Chart-Typ</span>
+						<select id="chartType">
+							<option value="candlestick" selected>Kerzen</option>
+							<option value="bar">Balken</option>
+							<option value="line">Linie</option>
+							<option value="area">Fläche</option>
+							<option value="baseline">Baseline</option>
+						</select>
+					</label>
+					<label class="win-toggle">
+						<input type="checkbox" id="toggleVolume">
+						<span class="track"></span>
+						<span class="toggle-label">Volumen</span>
+					</label>
 					<label class="win-toggle">
 						<input type="checkbox" id="toggleRay" checked>
 						<span class="track"></span>

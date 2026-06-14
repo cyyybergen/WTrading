@@ -31,7 +31,14 @@
 	const DIFF_LEVEL = 1;
 
 	// ---- Kraken public REST: fetch OHLC bars ----
-	const mapKrakenRow = r => ({ time: r[0], open: +r[1], high: +r[2], low: +r[3], close: +r[4] });
+	const mapKrakenRow = r => ({ time: r[0], open: +r[1], high: +r[2], low: +r[3], close: +r[4], volume: +r[6] });
+
+	const toCloseSeries = candles => candles.map(c => ({ time: c.time, value: c.close }));
+	const toVolumeData = candles => candles.map(c => ({
+		time: c.time,
+		value: c.volume,
+		color: c.close >= c.open ? COLORS.greenSoft + '88' : COLORS.red + '88',
+	}));
 
 	async function fetchKrakenOHLC(pair, interval) {
 		const url = 'https://api.kraken.com/0/public/OHLC?pair=' + pair + '&interval=' + interval;
@@ -328,6 +335,57 @@
 		host.innerHTML = '<p style="padding:16px;color:rgba(255,255,255,0.5)">Marktdaten werden geladen\u2026</p>';
 	}
 
+	// ---- price series factory: creates the right series type and populates it ----
+	function createPriceSeries(LWC, chart, type, candles) {
+		let series;
+		if (type === 'bar') {
+			series = chart.addSeries(LWC.BarSeries, {
+				upColor: COLORS.greenSoft,
+				downColor: COLORS.red,
+			});
+			series.setData(candles);
+		} else if (type === 'line') {
+			series = chart.addSeries(LWC.LineSeries, {
+				color: COLORS.greenSoft,
+				lineWidth: 2,
+				lastValueVisible: true,
+			});
+			series.setData(toCloseSeries(candles));
+		} else if (type === 'area') {
+			series = chart.addSeries(LWC.AreaSeries, {
+				lineColor: COLORS.greenSoft,
+				topColor: COLORS.greenSoft + '44',
+				bottomColor: COLORS.greenSoft + '00',
+				lastValueVisible: true,
+			});
+			series.setData(toCloseSeries(candles));
+		} else if (type === 'baseline') {
+			series = chart.addSeries(LWC.BaselineSeries, {
+				baseValue: { type: 'price', price: candles.length ? candles[0].close : 0 },
+				topLineColor: COLORS.green,
+				topFillColor1: COLORS.green + '33',
+				topFillColor2: COLORS.green + '00',
+				bottomLineColor: COLORS.red,
+				bottomFillColor1: COLORS.red + '00',
+				bottomFillColor2: COLORS.red + '33',
+				lastValueVisible: true,
+			});
+			series.setData(toCloseSeries(candles));
+		} else {
+			// candlestick (default)
+			series = chart.addSeries(LWC.CandlestickSeries, {
+				upColor: COLORS.greenSoft,
+				downColor: COLORS.red,
+				borderUpColor: COLORS.greenSoft,
+				borderDownColor: COLORS.red,
+				wickUpColor: COLORS.greenSoft,
+				wickDownColor: COLORS.red,
+			});
+			series.setData(candles);
+		}
+		return series;
+	}
+
 	// ---- chart setup ----
 	function buildChart(LWC, host, candles) {
 		host.innerHTML = '';
@@ -370,16 +428,6 @@
 		const ma = movingAverage(candles, CONFIG.maPeriod);
 		const result = analyze(candles, ma);
 
-		const candleSeries = chart.addSeries(LWC.CandlestickSeries, {
-			upColor: COLORS.greenSoft,
-			downColor: COLORS.red,
-			borderUpColor: COLORS.greenSoft,
-			borderDownColor: COLORS.red,
-			wickUpColor: COLORS.greenSoft,
-			wickDownColor: COLORS.red,
-		});
-		candleSeries.setData(candles);
-
 		const maSeries = chart.addSeries(LWC.LineSeries, {
 			color: COLORS.blue,
 			lineWidth: 2,
@@ -398,12 +446,23 @@
 		});
 		raySeries.setData(buildRayData(candles, 'auto', 'auto', result));
 
-		// fibonacci price lines on the candle series
+		// volume histogram — hidden by default, using a separate price scale
+		const volumeSeries = chart.addSeries(LWC.HistogramSeries, {
+			priceFormat: { type: 'volume' },
+			priceScaleId: 'volume',
+			lastValueVisible: false,
+			priceLineVisible: false,
+			visible: false,
+		});
+		chart.priceScale('volume').applyOptions({ scaleMargins: { top: 0.8, bottom: 0 } }); // compact lane: bottom 20%
+		volumeSeries.setData(toVolumeData(candles));
+
+		// fibonacci price lines attached to maSeries so they survive price-series switches
 		let fibLines = [];
 		let currentFibStart = result.fibStart;
 		let currentFibSize = result.legSize;
 		function paintFib(start, size) {
-			fibLines = FIB_LEVELS.map(level => candleSeries.createPriceLine({
+			fibLines = FIB_LEVELS.map(level => maSeries.createPriceLine({
 				price: start + size * level,
 				color: level === 1.618 ? COLORS.blue : (level === 0.5 ? COLORS.green : COLORS.orange),
 				lineWidth: level === 1.618 ? 2 : 1,
@@ -413,7 +472,7 @@
 			}));
 		}
 		function clearFib() {
-			fibLines.forEach(line => candleSeries.removePriceLine(line));
+			fibLines.forEach(line => maSeries.removePriceLine(line));
 			fibLines = [];
 		}
 		paintFib(currentFibStart, currentFibSize);
@@ -465,7 +524,32 @@
 			shape: 'circle',
 			size: 0.6,
 		}));
-		const markers = LWC.createSeriesMarkers(candleSeries, baseMarkers);
+
+		// mutable state shared with live polling
+		const state = { priceSeries: null, markersPlugin: null, chartType: 'candlestick' };
+
+		function buildMarkerList() {
+			const showDots = document.getElementById('toggleDots').checked;
+			const showExtrema = document.getElementById('toggleExtrema').checked;
+			return []
+				.concat(showDots ? baseMarkers : [])
+				.concat(showExtrema ? extremaMarkers : [])
+				.sort((a, b) => a.time - b.time);
+		}
+
+		function initPriceSeries(type) {
+			state.priceSeries = createPriceSeries(LWC, chart, type, candles);
+			state.markersPlugin = LWC.createSeriesMarkers(state.priceSeries, buildMarkerList());
+			state.chartType = type;
+		}
+
+		function switchSeries(newType) {
+			if (state.markersPlugin) { state.markersPlugin.detach(); }
+			if (state.priceSeries) { chart.removeSeries(state.priceSeries); }
+			initPriceSeries(newType);
+		}
+
+		initPriceSeries('candlestick');
 
 		chart.timeScale().fitContent();
 
@@ -486,6 +570,12 @@
 		signalOut.textContent = (result.signalBuy ? 'BUY @ ' : 'SELL @ ') + result.t2Price.toFixed(4);
 
 		// ---- paint toggles ----
+		document.getElementById('chartType').addEventListener('change', e => {
+			switchSeries(e.target.value);
+		});
+		document.getElementById('toggleVolume').addEventListener('change', e => {
+			volumeSeries.applyOptions({ visible: e.target.checked });
+		});
 		document.getElementById('toggleRay').addEventListener('change', e => {
 			raySeries.applyOptions({ visible: e.target.checked });
 		});
@@ -509,13 +599,7 @@
 		document.getElementById('fibLow').addEventListener('change', refreshFibRay);
 		document.getElementById('fibHigh').addEventListener('change', refreshFibRay);
 		function refreshMarkers() {
-			const showDots = document.getElementById('toggleDots').checked;
-			const showExtrema = document.getElementById('toggleExtrema').checked;
-			const list = []
-				.concat(showDots ? baseMarkers : [])
-				.concat(showExtrema ? extremaMarkers : [])
-				.sort((a, b) => a.time - b.time);
-			markers.setMarkers(list);
+			if (state.markersPlugin) { state.markersPlugin.setMarkers(buildMarkerList()); }
 		}
 		document.getElementById('toggleDots').addEventListener('change', refreshMarkers);
 		document.getElementById('toggleExtrema').addEventListener('change', refreshMarkers);
@@ -535,7 +619,7 @@
 		});
 		document.getElementById('togglePriceLabels').addEventListener('change', e => {
 			const visible = e.target.checked;
-			candleSeries.applyOptions({ priceLineVisible: visible, lastValueVisible: visible });
+			state.priceSeries.applyOptions({ priceLineVisible: visible, lastValueVisible: visible });
 			maSeries.applyOptions({ priceLineVisible: visible, lastValueVisible: visible });
 		});
 		document.getElementById('crosshairMode').addEventListener('change', e => {
@@ -545,12 +629,19 @@
 		// Sync marker visibility with initial toggle states.
 		refreshMarkers();
 
-		return candleSeries;
+		return state;
 	}
 
 	// ---- live polling: update last bar, add new bar on period rollover ----
-	function startLivePolling(candleSeries, initialCandles) {
+	function startLivePolling(state, initialCandles) {
 		let lastTime = initialCandles[initialCandles.length - 1].time;
+		const toUpdate = bar => {
+			const t = state.chartType;
+			if (t === 'line' || t === 'area' || t === 'baseline') {
+				return { time: bar.time, value: bar.close };
+			}
+			return bar;
+		};
 		const poll = async () => {
 			let fresh;
 			try {
@@ -565,12 +656,12 @@
 					// period rolled over: commit the now-complete previous bar first
 					const prevBar = fresh[fresh.length - 2];
 					if (prevBar && prevBar.time === lastTime) {
-						candleSeries.update(prevBar);
+						state.priceSeries.update(toUpdate(prevBar));
 					}
-					candleSeries.update(newBar);
+					state.priceSeries.update(toUpdate(newBar));
 					lastTime = newBar.time;
 				} else {
-					candleSeries.update(newBar);
+					state.priceSeries.update(toUpdate(newBar));
 				}
 			}
 			setTimeout(poll, CONFIG.pollMs);
@@ -601,8 +692,8 @@
 			return;
 		}
 
-		const candleSeries = buildChart(LWC, host, candles);
-		startLivePolling(candleSeries, candles);
+		const state = buildChart(LWC, host, candles);
+		startLivePolling(state, candles);
 	}
 
 	init();
