@@ -161,26 +161,40 @@
 		return findNearestToValue(diff, from, diff.length - 1, 0);
 	}
 
+	// t2 selection: after the extremum of f′ (t1) find the return crossing of the cycle threshold.
+	// Low-cycle  → f′ peaked above +DIFF_LEVEL → t2 is the first downward crossing of +DIFF_LEVEL after t0.
+	// High-cycle → f′ troughed below −DIFF_LEVEL → t2 is the first upward crossing of −DIFF_LEVEL after t0.
+	function resolveT2(diff, t0, phase, positiveCrossings) {
+		const maxDiffIdx = diff.length - 1;
+		let t2;
+		if (phase === 'low') {
+			// downward crossing of +1 (type === 'high' means crossed downward)
+			const c = positiveCrossings.find(x => x.index > t0 && x.type === 'high');
+			t2 = c ? c.index : findNearestToValue(diff, t0 + 1, maxDiffIdx, DIFF_LEVEL);
+		} else {
+			// upward crossing of −1 (type === 'low' means crossed upward through −DIFF_LEVEL)
+			const neg = findThresholdCrossings(diff, -DIFF_LEVEL);
+			const c = neg.find(x => x.index > t0 && x.type === 'low');
+			t2 = c ? c.index : findNearestToValue(diff, t0 + 1, maxDiffIdx, -DIFF_LEVEL);
+		}
+		return t2 <= t0 ? clampIndex(t0 + 1, maxDiffIdx) : t2;
+	}
+
 	function resolveCycle(diff) {
 		const maxDiffIdx = Math.max(0, diff.length - 1);
 		const crossings = findThresholdCrossings(diff, DIFF_LEVEL);
-		// Use the most recent complete crossing pair: t0 is the previous crossing, t2 is the latest crossing.
-		let t0Pos = crossings.length > 1 ? crossings.length - 2 : crossings.length - 1;
+		// Use the most recent complete crossing pair: t0 is the previous upward crossing of +1.
+		const upCrossings = crossings.filter(c => c.type === 'low');
+		let t0Pos = upCrossings.length > 1 ? upCrossings.length - 2 : upCrossings.length - 1;
 		if (t0Pos < 0) { t0Pos = 0; }
-		const t0Cross = crossings.length ? crossings[t0Pos] : undefined;
+		const t0Cross = upCrossings.length ? upCrossings[t0Pos] : undefined;
 		const t0 = t0Cross ? t0Cross.index : findNearestToValue(diff, 1, maxDiffIdx, DIFF_LEVEL);
-
-		let t2 = t0Pos + 1 < crossings.length ? crossings[t0Pos + 1].index : -1;
-		if (t2 === -1) {
-			t2 = findNearestToValue(diff, t0 + 1, maxDiffIdx, DIFF_LEVEL);
-		}
-		if (t2 <= t0) {
-			t2 = clampIndex(t0 + 1, maxDiffIdx);
-		}
 
 		const fallbackPrev = diff[Math.max(0, t0 - 1)].value;
 		const fallbackCurr = diff[t0].value;
 		const phase = t0Cross ? t0Cross.type : (fallbackPrev <= fallbackCurr ? 'low' : 'high');
+		// t2 snaps to the return crossing of ±DIFF_LEVEL (sine-model: same level, opposite direction).
+		const t2 = resolveT2(diff, t0, phase, crossings);
 		const t1 = findT1(diff, t0, t2, phase);
 		// t3 snaps to the inverse threshold after t2 (low-cycle targets -1, high-cycle targets +1).
 		const t3 = findNearestToValue(diff, t2 + 1, maxDiffIdx, phase === 'low' ? -1 : 1);
@@ -368,41 +382,43 @@
 		paintFib();
 
 		// t0/t1/t2/t3/t4 markers + extrema markers
+		// Each label shows the point name and the f′ value at that point so the
+		// difference-quotient results are readable directly on the graph.
 		const baseMarkers = [
 			{
 				time: result.c0.time,
 				position: result.phase === 'low' ? 'belowBar' : 'aboveBar',
 				color: COLORS.green,
 				shape: 'circle',
-				text: 't0',
+				text: 't0  f\u2032=' + fmtDiff(result.f2),
 			},
 			{
 				time: result.c1.time,
 				position: result.phase === 'low' ? 'aboveBar' : 'belowBar',
 				color: COLORS.orange,
 				shape: 'circle',
-				text: 't1',
+				text: 't1  \u0394=' + fmtDiff(result.f1),
 			},
 			{
 				time: result.c2.time,
 				position: result.signalBuy ? 'belowBar' : 'aboveBar',
 				color: COLORS.blue,
 				shape: result.signalBuy ? 'arrowUp' : 'arrowDown',
-				text: 't2 ' + result.t2Price.toFixed(4),
+				text: 't2  f\u2032=' + fmtDiff(result.f4) + '  @' + result.t2Price.toFixed(4),
 			},
 			{
 				time: result.c3.time,
 				position: result.phase === 'low' ? 'belowBar' : 'aboveBar',
 				color: COLORS.orange,
 				shape: 'circle',
-				text: 't3',
+				text: 't3  f\u2032=' + fmtDiff(result.f5),
 			},
 			{
 				time: result.c4.time,
 				position: result.phase === 'low' ? 'aboveBar' : 'belowBar',
 				color: COLORS.green,
 				shape: 'circle',
-				text: 't4',
+				text: 't4  f\u2032=' + fmtDiff(result.f6),
 			},
 		];
 		const extremaMarkers = result.extrema.map(e => ({
