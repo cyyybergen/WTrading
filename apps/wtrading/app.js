@@ -28,6 +28,7 @@
 	};
 
 	const FIB_LEVELS = [0, 0.236, 0.382, 0.5, 0.618, 0.786, 1, 1.618, 2.618];
+	const DIFF_LEVEL = 1;
 
 	// ---- Kraken public REST: fetch OHLC bars ----
 	const mapKrakenRow = r => ({ time: r[0], open: +r[1], high: +r[2], low: +r[3], close: +r[4] });
@@ -100,40 +101,143 @@
 	// signal continuation to the next fibonacci level
 	const THRESHOLD = 0.5;
 
-	// ---- theory: find t0 (low, f' crosses 0 upward) and t1 (f' reaches 1) ----
+	const clampIndex = (i, max) => Math.max(0, Math.min(i, max));
+
+	const fmtDiff = value => (value >= 0 ? '+' : '') + value.toFixed(3);
+
+	function findThresholdCrossings(diff, level) {
+		const out = [];
+		for (let i = 1; i < diff.length; i++) {
+			const prev = diff[i - 1].value;
+			const curr = diff[i].value;
+			if (prev <= level && curr >= level) {
+				out.push({ index: i, type: 'low' });
+			} else if (prev >= level && curr <= level) {
+				out.push({ index: i, type: 'high' });
+			}
+		}
+		return out;
+	}
+
+	function findNearestToValue(diff, start, end, target) {
+		const from = clampIndex(start, diff.length - 1);
+		const to = clampIndex(end, diff.length - 1);
+		let idx = from;
+		let best = Infinity;
+		for (let i = from; i <= to; i++) {
+			const distance = Math.abs(diff[i].value - target);
+			if (distance < best) {
+				best = distance;
+				idx = i;
+			}
+		}
+		return idx;
+	}
+
+	function findT1(diff, t0, t2, phase) {
+		const start = clampIndex(t0 + 1, diff.length - 1);
+		const end = clampIndex(Math.max(start, t2 - 1), diff.length - 1);
+		let idx = start;
+		let best = phase === 'low' ? -Infinity : Infinity;
+		for (let i = start; i <= end; i++) {
+			const value = diff[i].value;
+			if ((phase === 'low' && value > best) || (phase === 'high' && value < best)) {
+				best = value;
+				idx = i;
+			}
+		}
+		return idx;
+	}
+
+	function findT4(diff, start, phase) {
+		const from = clampIndex(start, diff.length - 1);
+		for (let i = Math.max(1, from); i < diff.length; i++) {
+			const prev = diff[i - 1].value;
+			const curr = diff[i].value;
+			if ((phase === 'low' && prev <= 0 && curr >= 0) || (phase === 'high' && prev >= 0 && curr <= 0)) {
+				return i;
+			}
+		}
+		return findNearestToValue(diff, from, diff.length - 1, 0);
+	}
+
+	// t2 selection: after the extremum of f′ (t1) find the return crossing of the cycle threshold.
+	// Low-cycle  → f′ peaked above +DIFF_LEVEL → t2 is the first downward crossing of +DIFF_LEVEL after t0.
+	// High-cycle → f′ troughed below −DIFF_LEVEL → t2 is the first upward crossing of −DIFF_LEVEL after t0.
+	function resolveT2(diff, t0, phase, positiveCrossings) {
+		const maxDiffIdx = diff.length - 1;
+		let t2;
+		if (phase === 'low') {
+			// downward crossing of +1 (type === 'high' means crossed downward)
+			const downwardCrossing = positiveCrossings.find(x => x.index > t0 && x.type === 'high');
+			t2 = downwardCrossing ? downwardCrossing.index : findNearestToValue(diff, t0 + 1, maxDiffIdx, DIFF_LEVEL);
+		} else {
+			// upward crossing of −1 (type === 'low' means crossed upward through −DIFF_LEVEL)
+			const negativeCrossings = findThresholdCrossings(diff, -DIFF_LEVEL);
+			const upwardCrossing = negativeCrossings.find(x => x.index > t0 && x.type === 'low');
+			t2 = upwardCrossing ? upwardCrossing.index : findNearestToValue(diff, t0 + 1, maxDiffIdx, -DIFF_LEVEL);
+		}
+		return t2 <= t0 ? clampIndex(t0 + 1, maxDiffIdx) : t2;
+	}
+
+	function resolveCycle(diff) {
+		const maxDiffIdx = Math.max(0, diff.length - 1);
+		const crossings = findThresholdCrossings(diff, DIFF_LEVEL);
+		// Use the most recent complete crossing pair: t0 is the previous upward crossing of +1.
+		const upCrossings = crossings.filter(c => c.type === 'low');
+		let t0Pos = upCrossings.length > 1 ? upCrossings.length - 2 : upCrossings.length - 1;
+		if (t0Pos < 0) { t0Pos = 0; }
+		const t0Cross = upCrossings.length ? upCrossings[t0Pos] : undefined;
+		const t0 = t0Cross ? t0Cross.index : findNearestToValue(diff, 1, maxDiffIdx, DIFF_LEVEL);
+
+		const fallbackPrev = diff[Math.max(0, t0 - 1)].value;
+		const fallbackCurr = diff[t0].value;
+		const phase = t0Cross ? t0Cross.type : (fallbackPrev <= fallbackCurr ? 'low' : 'high');
+		// t2 snaps to the return crossing of ±DIFF_LEVEL (sine-model: same level, opposite direction).
+		const t2 = resolveT2(diff, t0, phase, crossings);
+		const t1 = findT1(diff, t0, t2, phase);
+		// t3 snaps to the inverse threshold after t2 (low-cycle targets -1, high-cycle targets +1).
+		const t3 = findNearestToValue(diff, t2 + 1, maxDiffIdx, phase === 'low' ? -1 : 1);
+		const t4 = findT4(diff, t3 + 1, phase);
+		return { t0, t1, t2, t3, t4, phase, maxDiffIdx };
+	}
+
+	// ---- theory: threshold-based cycle snapping (t0/t2/t3/t4) ----
 	function analyze(candles, ma) {
 		// Scale normalizes bar-to-bar slopes so that an average move maps to 0.5
 		// and the "f' \u2265 1" breakout condition is ~2\u00d7 the average daily move.
 		const scale = computeScale(ma);
 		const diff = differential(ma, scale);
 		const maOffset = candles.length - ma.length;
-
-		let t0 = -1; // index into ma
-		let t1 = -1;
-		for (let i = 1; i < diff.length; i++) {
-			if (t0 === -1 && diff[i - 1].value <= 0 && diff[i].value > 0) {
-				t0 = i; // low: differential quotient crosses 0
-			} else if (t0 !== -1 && diff[i].value >= 1) {
-				t1 = i; // differential quotient reaches 1
-				break;
-			}
+		if (!diff.length) {
+			const c = candles[candles.length - 1];
+			return {
+				diff: [{ time: c.time, value: 0 }],
+				maOffset, t0: 0, t1: 0, t2: 0, t3: 0, t4: 0,
+				c0: c, c1: c, c2: c, c3: c, c4: c, bars: 1, phase: 'low',
+				extrema: [], fibStart: c.low, legSize: Math.max(1e-9, c.high - c.low),
+				rayStartPrice: c.low, rayEndPrice: c.low, t2Price: c.close, signalBuy: false,
+				f1: 0, f2: 0, f3: 0, f4: 0, f5: 0, f6: 0, f7: 'Low · t2→t4 Δ=+0.000',
+			};
 		}
-		if (t0 === -1) { t0 = 1; }
-		if (t1 === -1) { t1 = Math.min(t0 + 20, diff.length - 1); }
-
-		const c0 = candles[t0 + maOffset];
-		const c1 = candles[t1 + maOffset];
+		const cycle = resolveCycle(diff);
+		const t0 = clampIndex(cycle.t0, cycle.maxDiffIdx);
+		const t1 = cycle.t1;
+		const t2 = cycle.t2;
+		const t3 = cycle.t3;
+		const t4 = cycle.t4;
+		const phase = cycle.phase;
+		const c0 = candles[clampIndex(t0 + maOffset, candles.length - 1)];
+		const c1 = candles[clampIndex(t1 + maOffset, candles.length - 1)];
+		const c2 = candles[clampIndex(t2 + maOffset, candles.length - 1)];
+		const c3 = candles[clampIndex(t3 + maOffset, candles.length - 1)];
+		const c4 = candles[clampIndex(t4 + maOffset, candles.length - 1)];
 		const bars = (t1 - t0) || 1;
-		const up = c1.close >= c0.low;
-		const legLow = Math.min(c0.low, c1.low);
-		const legHigh = Math.max(c0.high, c1.high);
-		const legSize = legHigh - legLow || 1e-9;
-
-		// t2: target price at the next fib level (1.618 extension in trend direction)
-		const t2Price = up ? legLow + legSize * 1.618 : legHigh - legSize * 1.618;
-
-		const oneThirdEnd = t1 + Math.max(1, Math.round(bars / 3));
-		const zeroNineLen = Math.max(1, Math.round(bars * 0.09));
+		const lowCycle = phase === 'low';
+		const fibStart = lowCycle ? c0.low : c0.high;
+		const fibEnd = lowCycle ? c2.high : c2.low;
+		const legSize = (fibEnd - fibStart) || 1e-9;
+		const t2ToT4AvgDiff = avgDifferential(diff, t2, Math.min(diff.length, t4 + 1));
 
 		// extrema markers: every f' zero crossing
 		const extrema = [];
@@ -146,22 +250,73 @@
 		}
 
 		return {
-			diff, maOffset, t0, t1, c0, c1, bars, up, legLow, legHigh, legSize, t2Price, extrema,
+			diff, maOffset, t0, t1, t2, t3, t4, c0, c1, c2, c3, c4, bars, phase, extrema,
+			fibStart, legSize,
+			rayStartPrice: lowCycle ? c0.low : c0.high,
+			rayEndPrice: lowCycle ? c1.high : c1.low,
+			t2Price: lowCycle ? c2.high : c2.low,
+			signalBuy: !lowCycle,
 			// 1. difference quotient t0→t1
-			f1: differenceQuotient(c0.low, c1.close, bars, scale),
+			f1: differenceQuotient(lowCycle ? c0.low : c0.high, lowCycle ? c1.high : c1.low, bars, scale),
 			// 2. difference quotient at t0
-			f2: differenceQuotient(c0.low, candles[t0 + maOffset + 1].close, 1, scale),
+			f2: differenceQuotient(
+				lowCycle ? c0.low : c0.high,
+				candles[clampIndex(t0 + maOffset + 1, candles.length - 1)].close,
+				1,
+				scale
+			),
 			// 3. live differential quotient of MA
 			f3: diff[diff.length - 1].value,
-			// 4. differential quotient at t1
-			f4: diff[t1].value,
-			// 5. differential quotient ⅓ way
-			f5: avgDifferential(diff, t1, oneThirdEnd),
-			// 6. differential quotient of 0.09 length
-			f6: avgDifferential(diff, diff.length - zeroNineLen, diff.length),
-			// 7. low/high detector value
-			f7: extrema.length ? diff[diff.length - 1].value : 0,
+			// 4. differential quotient at t2 (f' ~= 1 cycle snap)
+			f4: diff[t2].value,
+			// 5. differential quotient at t3 (f' ~= -1 / +1 reversed)
+			f5: diff[t3].value,
+			// 6. differential quotient at t4 (f' ~= 0 snap)
+			f6: diff[t4].value,
+			// 7. phase summary
+			f7: (phase === 'low' ? 'Low' : 'High') + ' · t2→t4 Δ=' + fmtDiff(t2ToT4AvgDiff),
 		};
+	}
+
+	// ---- fib / ray anchor selection helpers ----
+	// Maps a t-point selection ('auto'|'t0'..'t4') to the candle at that point.
+	function candleForSel(sel, result) {
+		const map = { t0: result.c0, t1: result.c1, t2: result.c2, t3: result.c3, t4: result.c4 };
+		return sel === 'auto' ? null : (map[sel] || null);
+	}
+
+	// Returns { start, size } for fibonacci levels given two dropdown selections.
+	// lowSel picks the candle whose LOW anchors the start; highSel picks the candle whose HIGH anchors the end.
+	function getFibBounds(lowSel, highSel, result) {
+		const lowCandle = candleForSel(lowSel, result);
+		const highCandle = candleForSel(highSel, result);
+		const start = lowCandle ? lowCandle.low : result.fibStart;
+		const end = highCandle ? highCandle.high : (result.fibStart + result.legSize);
+		return { start, size: (end - start) || 1e-9 };
+	}
+
+	// Builds the extrapolated ray series data between two selected t-points.
+	// lowSel provides the start anchor (low price at that t-point, bar index of that t-point).
+	// highSel provides the end anchor (high price). The slope is extrapolated to the last candle.
+	function buildRayData(candles, lowSel, highSel, result) {
+		const tMap = { t0: result.t0, t1: result.t1, t2: result.t2, t3: result.t3, t4: result.t4 };
+		function resolveIdx(sel, fallback) {
+			return sel === 'auto' || tMap[sel] === undefined ? fallback : tMap[sel];
+		}
+		const startTIdx = resolveIdx(lowSel, result.t0);
+		const endTIdx = resolveIdx(highSel, result.t1);
+		const lowCandle = candleForSel(lowSel, result);
+		const highCandle = candleForSel(highSel, result);
+		const startPrice = lowCandle ? lowCandle.low : result.rayStartPrice;
+		const endPrice = highCandle ? highCandle.high : result.rayEndPrice;
+		const startBar = startTIdx + result.maOffset;
+		const endBar = endTIdx + result.maOffset;
+		const slopePerBar = (endPrice - startPrice) / ((endBar - startBar) || 1);
+		const data = [];
+		for (let i = startBar; i < candles.length; i++) {
+			data.push({ time: candles[i].time, value: startPrice + slopePerBar * (i - startBar) });
+		}
+		return data;
 	}
 
 	// ---- UI helpers ----
@@ -188,10 +343,27 @@
 				horzLines: { color: COLORS.grid },
 			},
 			crosshair: {
+				mode: LWC.CrosshairMode.Magnet,
 				vertLine: { color: COLORS.blue, labelBackgroundColor: COLORS.blueAccent },
 				horzLine: { color: COLORS.blue, labelBackgroundColor: COLORS.blueAccent },
 			},
-			timeScale: { borderColor: 'rgba(255,255,255,0.12)' },
+			handleScale: {
+				mouseWheel: true,
+				pinch: true,
+				axisPressedMouseMove: true,
+			},
+			handleScroll: {
+				mouseWheel: true,
+				pressedMouseMove: true,
+				horzTouchDrag: true,
+				vertTouchDrag: false,
+			},
+			timeScale: {
+				borderColor: 'rgba(255,255,255,0.12)',
+				timeVisible: true,
+				rightOffset: 4,
+			},
+			leftPriceScale: { visible: false, borderColor: 'rgba(255,255,255,0.12)' },
 			rightPriceScale: { borderColor: 'rgba(255,255,255,0.12)' },
 		});
 
@@ -224,21 +396,15 @@
 			lastValueVisible: false,
 			crosshairMarkerVisible: false,
 		});
-		const slopePerBar = (result.c1.close - result.c0.low) / result.bars;
-		const i0 = result.t0 + result.maOffset;
-		const rayData = [];
-		for (let i = i0; i < candles.length; i++) {
-			rayData.push({ time: candles[i].time, value: result.c0.low + slopePerBar * (i - i0) });
-		}
-		raySeries.setData(rayData);
+		raySeries.setData(buildRayData(candles, 'auto', 'auto', result));
 
 		// fibonacci price lines on the candle series
 		let fibLines = [];
-		function paintFib() {
+		let currentFibStart = result.fibStart;
+		let currentFibSize = result.legSize;
+		function paintFib(start, size) {
 			fibLines = FIB_LEVELS.map(level => candleSeries.createPriceLine({
-				price: result.up
-					? result.legLow + result.legSize * level
-					: result.legHigh - result.legSize * level,
+				price: start + size * level,
 				color: level === 1.618 ? COLORS.blue : (level === 0.5 ? COLORS.green : COLORS.orange),
 				lineWidth: level === 1.618 ? 2 : 1,
 				lineStyle: LWC.LineStyle.Dotted,
@@ -250,18 +416,46 @@
 			fibLines.forEach(line => candleSeries.removePriceLine(line));
 			fibLines = [];
 		}
-		paintFib();
+		paintFib(currentFibStart, currentFibSize);
 
-		// t0/t1/t2 dot markers + extrema markers
+		// t0/t1/t2/t3/t4 markers + extrema markers
+		// Each label shows the point name and the f′ value at that point so the
+		// difference-quotient results are readable directly on the graph.
 		const baseMarkers = [
-			{ time: result.c0.time, position: 'belowBar', color: COLORS.green, shape: 'circle', text: 't0' },
-			{ time: result.c1.time, position: 'aboveBar', color: COLORS.orange, shape: 'circle', text: 't1' },
 			{
-				time: candles[candles.length - 1].time,
-				position: result.up ? 'belowBar' : 'aboveBar',
+				time: result.c0.time,
+				position: result.phase === 'low' ? 'belowBar' : 'aboveBar',
+				color: COLORS.green,
+				shape: 'circle',
+				text: 't0  f\u2032=' + fmtDiff(result.f2),
+			},
+			{
+				time: result.c1.time,
+				position: result.phase === 'low' ? 'aboveBar' : 'belowBar',
+				color: COLORS.orange,
+				shape: 'circle',
+				text: 't1  \u0394=' + fmtDiff(result.f1),
+			},
+			{
+				time: result.c2.time,
+				position: result.signalBuy ? 'belowBar' : 'aboveBar',
 				color: COLORS.blue,
-				shape: result.up ? 'arrowUp' : 'arrowDown',
-				text: 't2 ' + result.t2Price.toFixed(4),
+				shape: result.signalBuy ? 'arrowUp' : 'arrowDown',
+				text: 't2  f\u2032=' + fmtDiff(result.f4) + '  @' + result.t2Price.toFixed(4),
+			},
+			{
+				time: result.c3.time,
+				position: result.phase === 'low' ? 'belowBar' : 'aboveBar',
+				color: COLORS.orange,
+				shape: 'circle',
+				text: 't3  f\u2032=' + fmtDiff(result.f5),
+			},
+			{
+				time: result.c4.time,
+				position: result.phase === 'low' ? 'aboveBar' : 'belowBar',
+				color: COLORS.green,
+				shape: 'circle',
+				text: 't4  f\u2032=' + fmtDiff(result.f6),
 			},
 		];
 		const extremaMarkers = result.extrema.map(e => ({
@@ -276,28 +470,44 @@
 		chart.timeScale().fitContent();
 
 		// ---- formula readouts ----
-		const fmt = v => (v >= 0 ? '+' : '') + v.toFixed(3);
-		document.getElementById('f1').textContent = fmt(result.f1);
-		document.getElementById('f2').textContent = fmt(result.f2);
-		document.getElementById('f3').textContent = fmt(result.f3);
-		document.getElementById('f4').textContent = fmt(result.f4);
-		document.getElementById('f5').textContent = fmt(result.f5) + (Math.abs(result.f5) > THRESHOLD ? ' \u2192 weiter' : '');
-		document.getElementById('f6').textContent = fmt(result.f6) + (Math.abs(result.f6) > THRESHOLD ? ' \u2192 n\u00e4chstes Fib' : '');
-		document.getElementById('f7').textContent = result.extrema.length + ' Extrema';
+		document.getElementById('f1').textContent = fmtDiff(result.f1);
+		document.getElementById('f2').textContent = fmtDiff(result.f2);
+		document.getElementById('f3').textContent = fmtDiff(result.f3);
+		document.getElementById('f4').textContent = fmtDiff(result.f4);
+		document.getElementById('f5').textContent = fmtDiff(result.f5);
+		document.getElementById('f6').textContent = fmtDiff(result.f6)
+			+ (Math.abs(result.f6) > THRESHOLD ? ' \u2192 n\u00e4chstes Fib' : '');
+		document.getElementById('f7').textContent = result.f7;
 
 		const signalCard = document.getElementById('signalCard');
 		const signalOut = document.getElementById('signal');
 		signalCard.classList.remove('buy', 'sell');
-		signalCard.classList.add(result.up ? 'buy' : 'sell');
-		signalOut.textContent = (result.up ? 'BUY @ ' : 'SELL @ ') + result.t2Price.toFixed(4);
+		signalCard.classList.add(result.signalBuy ? 'buy' : 'sell');
+		signalOut.textContent = (result.signalBuy ? 'BUY @ ' : 'SELL @ ') + result.t2Price.toFixed(4);
 
 		// ---- paint toggles ----
 		document.getElementById('toggleRay').addEventListener('change', e => {
 			raySeries.applyOptions({ visible: e.target.checked });
 		});
 		document.getElementById('toggleFib').addEventListener('change', e => {
-			if (e.target.checked) { paintFib(); } else { clearFib(); }
+			if (e.target.checked) { paintFib(currentFibStart, currentFibSize); } else { clearFib(); }
 		});
+		// Fib / ray anchor selection: updates fib levels and ray slope when the user
+		// picks a different t-point for the low or high anchor.
+		function refreshFibRay() {
+			const lowSel = document.getElementById('fibLow').value;
+			const highSel = document.getElementById('fibHigh').value;
+			const bounds = getFibBounds(lowSel, highSel, result);
+			currentFibStart = bounds.start;
+			currentFibSize = bounds.size;
+			clearFib();
+			if (document.getElementById('toggleFib').checked) {
+				paintFib(currentFibStart, currentFibSize);
+			}
+			raySeries.setData(buildRayData(candles, lowSel, highSel, result));
+		}
+		document.getElementById('fibLow').addEventListener('change', refreshFibRay);
+		document.getElementById('fibHigh').addEventListener('change', refreshFibRay);
 		function refreshMarkers() {
 			const showDots = document.getElementById('toggleDots').checked;
 			const showExtrema = document.getElementById('toggleExtrema').checked;
@@ -309,6 +519,31 @@
 		}
 		document.getElementById('toggleDots').addEventListener('change', refreshMarkers);
 		document.getElementById('toggleExtrema').addEventListener('change', refreshMarkers);
+		document.getElementById('toggleGrid').addEventListener('change', e => {
+			const visible = e.target.checked;
+			chart.applyOptions({
+				grid: {
+					vertLines: { visible, color: COLORS.grid },
+					horzLines: { visible, color: COLORS.grid },
+				},
+			});
+		});
+		document.getElementById('toggleLeftScale').addEventListener('change', e => {
+			chart.applyOptions({
+				leftPriceScale: { visible: e.target.checked, borderColor: 'rgba(255,255,255,0.12)' },
+			});
+		});
+		document.getElementById('togglePriceLabels').addEventListener('change', e => {
+			const visible = e.target.checked;
+			candleSeries.applyOptions({ priceLineVisible: visible, lastValueVisible: visible });
+			maSeries.applyOptions({ priceLineVisible: visible, lastValueVisible: visible });
+		});
+		document.getElementById('crosshairMode').addEventListener('change', e => {
+			const mode = e.target.value === 'normal' ? LWC.CrosshairMode.Normal : LWC.CrosshairMode.Magnet;
+			chart.applyOptions({ crosshair: { mode } });
+		});
+		// Sync marker visibility with initial toggle states.
+		refreshMarkers();
 
 		return candleSeries;
 	}
