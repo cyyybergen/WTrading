@@ -164,16 +164,13 @@
 	function resolveCycle(diff) {
 		const maxDiffIdx = Math.max(0, diff.length - 1);
 		const crossings = findThresholdCrossings(diff, DIFF_LEVEL);
+		// Use the most recent complete crossing pair: t0 is the previous crossing, t2 is the latest crossing.
 		let t0Pos = crossings.length > 1 ? crossings.length - 2 : crossings.length - 1;
 		if (t0Pos < 0) { t0Pos = 0; }
-		const t0Cross = crossings[t0Pos];
+		const t0Cross = crossings.length ? crossings[t0Pos] : undefined;
 		const t0 = t0Cross ? t0Cross.index : findNearestToValue(diff, 1, maxDiffIdx, DIFF_LEVEL);
 
-		let t2 = -1;
-		for (let i = t0Pos + 1; i < crossings.length; i++) {
-			t2 = crossings[i].index;
-			break;
-		}
+		let t2 = t0Pos + 1 < crossings.length ? crossings[t0Pos + 1].index : -1;
 		if (t2 === -1) {
 			t2 = findNearestToValue(diff, t0 + 1, maxDiffIdx, DIFF_LEVEL);
 		}
@@ -181,8 +178,11 @@
 			t2 = clampIndex(t0 + 1, maxDiffIdx);
 		}
 
-		const phase = t0Cross ? t0Cross.type : (diff[t0].value >= DIFF_LEVEL ? 'low' : 'high');
+		const fallbackPrev = diff[Math.max(0, t0 - 1)].value;
+		const fallbackCurr = diff[t0].value;
+		const phase = t0Cross ? t0Cross.type : (fallbackPrev <= fallbackCurr ? 'low' : 'high');
 		const t1 = findT1(diff, t0, t2, phase);
+		// t3 snaps to the inverse threshold after t2 (low-cycle targets -1, high-cycle targets +1).
 		const t3 = findNearestToValue(diff, t2 + 1, maxDiffIdx, phase === 'low' ? -1 : 1);
 		const t4 = findT4(diff, t3 + 1, phase);
 		return { t0, t1, t2, t3, t4, phase, maxDiffIdx };
@@ -203,7 +203,7 @@
 				c0: c, c1: c, c2: c, c3: c, c4: c, bars: 1, phase: 'low',
 				extrema: [], fibStart: c.low, legSize: Math.max(1e-9, c.high - c.low),
 				rayStartPrice: c.low, rayEndPrice: c.low, t2Price: c.close, signalBuy: false,
-				f1: 0, f2: 0, f3: 0, f4: 0, f5: 0, f6: 0, f7: 'Low · t2→t4 Δ=+0.000', cycleAvg: 0,
+				f1: 0, f2: 0, f3: 0, f4: 0, f5: 0, f6: 0, f7: 'Low · t2→t4 Δ=+0.000',
 			};
 		}
 		const cycle = resolveCycle(diff);
@@ -223,8 +223,7 @@
 		const fibStart = lowCycle ? c0.low : c0.high;
 		const fibEnd = lowCycle ? c2.high : c2.low;
 		const legSize = (fibEnd - fibStart) || 1e-9;
-		const oneThirdEnd = t1 + Math.max(1, Math.round(bars / 3));
-		const zeroNineLen = Math.max(1, Math.round(bars * 0.09));
+		const t2ToT4AvgDiff = avgDifferential(diff, t2, Math.min(diff.length, t4 + 1));
 
 		// extrema markers: every f' zero crossing
 		const extrema = [];
@@ -261,8 +260,7 @@
 			// 6. differential quotient at t4 (f' ~= 0 snap)
 			f6: diff[t4].value,
 			// 7. phase summary
-			f7: (phase === 'low' ? 'Low' : 'High') + ' · t2→t4 Δ=' + fmtDiff(avgDifferential(diff, t1, oneThirdEnd)),
-			cycleAvg: avgDifferential(diff, diff.length - zeroNineLen, diff.length),
+			f7: (phase === 'low' ? 'Low' : 'High') + ' · t2→t4 Δ=' + fmtDiff(t2ToT4AvgDiff),
 		};
 	}
 
@@ -425,7 +423,7 @@
 		document.getElementById('f4').textContent = fmtDiff(result.f4);
 		document.getElementById('f5').textContent = fmtDiff(result.f5);
 		document.getElementById('f6').textContent = fmtDiff(result.f6)
-			+ (Math.abs(result.cycleAvg) > THRESHOLD ? ' \u2192 n\u00e4chstes Fib' : '');
+			+ (Math.abs(result.f6) > THRESHOLD ? ' \u2192 n\u00e4chstes Fib' : '');
 		document.getElementById('f7').textContent = result.f7;
 
 		const signalCard = document.getElementById('signalCard');
@@ -475,6 +473,7 @@
 			const mode = e.target.value === 'normal' ? LWC.CrosshairMode.Normal : LWC.CrosshairMode.Magnet;
 			chart.applyOptions({ crosshair: { mode } });
 		});
+		// Sync marker visibility with initial toggle states.
 		refreshMarkers();
 
 		return candleSeries;
