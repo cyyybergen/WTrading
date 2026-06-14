@@ -278,6 +278,44 @@
 		};
 	}
 
+	// ---- fib / ray anchor selection helpers ----
+	// Maps a t-point selection ('auto'|'t0'..'t4') to the candle at that point.
+	function candleForSel(sel, result) {
+		const map = { t0: result.c0, t1: result.c1, t2: result.c2, t3: result.c3, t4: result.c4 };
+		return sel === 'auto' ? null : (map[sel] || null);
+	}
+
+	// Returns { start, size } for fibonacci levels given two dropdown selections.
+	// lowSel picks the candle whose LOW anchors the start; highSel picks the candle whose HIGH anchors the end.
+	function getFibBounds(lowSel, highSel, result) {
+		const lowCandle = candleForSel(lowSel, result);
+		const highCandle = candleForSel(highSel, result);
+		const start = lowCandle ? lowCandle.low : result.fibStart;
+		const end = highCandle ? highCandle.high : (result.fibStart + result.legSize);
+		return { start, size: (end - start) || 1e-9 };
+	}
+
+	// Builds the extrapolated ray series data between two selected t-points.
+	// lowSel provides the start anchor (low price at that t-point, bar index of that t-point).
+	// highSel provides the end anchor (high price). The slope is extrapolated to the last candle.
+	function buildRayData(candles, lowSel, highSel, result) {
+		const tMap = { t0: result.t0, t1: result.t1, t2: result.t2, t3: result.t3, t4: result.t4 };
+		const startTIdx = lowSel === 'auto' ? result.t0 : (tMap[lowSel] !== undefined ? tMap[lowSel] : result.t0);
+		const endTIdx = highSel === 'auto' ? result.t1 : (tMap[highSel] !== undefined ? tMap[highSel] : result.t1);
+		const lowCandle = candleForSel(lowSel, result);
+		const highCandle = candleForSel(highSel, result);
+		const startPrice = lowCandle ? lowCandle.low : result.rayStartPrice;
+		const endPrice = highCandle ? highCandle.high : result.rayEndPrice;
+		const startBar = startTIdx + result.maOffset;
+		const endBar = endTIdx + result.maOffset;
+		const slopePerBar = (endPrice - startPrice) / ((endBar - startBar) || 1);
+		const data = [];
+		for (let i = startBar; i < candles.length; i++) {
+			data.push({ time: candles[i].time, value: startPrice + slopePerBar * (i - startBar) });
+		}
+		return data;
+	}
+
 	// ---- UI helpers ----
 	function showError(host, msg) {
 		host.innerHTML = '<p style="padding:16px;color:#ef5350">' + msg + '</p>';
@@ -355,19 +393,15 @@
 			lastValueVisible: false,
 			crosshairMarkerVisible: false,
 		});
-		const slopePerBar = (result.rayEndPrice - result.rayStartPrice) / result.bars;
-		const i0 = result.t0 + result.maOffset;
-		const rayData = [];
-		for (let i = i0; i < candles.length; i++) {
-			rayData.push({ time: candles[i].time, value: result.rayStartPrice + slopePerBar * (i - i0) });
-		}
-		raySeries.setData(rayData);
+		raySeries.setData(buildRayData(candles, 'auto', 'auto', result));
 
 		// fibonacci price lines on the candle series
 		let fibLines = [];
-		function paintFib() {
+		let currentFibStart = result.fibStart;
+		let currentFibSize = result.legSize;
+		function paintFib(start, size) {
 			fibLines = FIB_LEVELS.map(level => candleSeries.createPriceLine({
-				price: result.fibStart + result.legSize * level,
+				price: start + size * level,
 				color: level === 1.618 ? COLORS.blue : (level === 0.5 ? COLORS.green : COLORS.orange),
 				lineWidth: level === 1.618 ? 2 : 1,
 				lineStyle: LWC.LineStyle.Dotted,
@@ -379,7 +413,7 @@
 			fibLines.forEach(line => candleSeries.removePriceLine(line));
 			fibLines = [];
 		}
-		paintFib();
+		paintFib(currentFibStart, currentFibSize);
 
 		// t0/t1/t2/t3/t4 markers + extrema markers
 		// Each label shows the point name and the f′ value at that point so the
@@ -453,8 +487,24 @@
 			raySeries.applyOptions({ visible: e.target.checked });
 		});
 		document.getElementById('toggleFib').addEventListener('change', e => {
-			if (e.target.checked) { paintFib(); } else { clearFib(); }
+			if (e.target.checked) { paintFib(currentFibStart, currentFibSize); } else { clearFib(); }
 		});
+		// Fib / ray anchor selection: updates fib levels and ray slope when the user
+		// picks a different t-point for the low or high anchor.
+		function refreshFibRay() {
+			const lowSel = document.getElementById('fibLow').value;
+			const highSel = document.getElementById('fibHigh').value;
+			const bounds = getFibBounds(lowSel, highSel, result);
+			currentFibStart = bounds.start;
+			currentFibSize = bounds.size;
+			clearFib();
+			if (document.getElementById('toggleFib').checked) {
+				paintFib(currentFibStart, currentFibSize);
+			}
+			raySeries.setData(buildRayData(candles, lowSel, highSel, result));
+		}
+		document.getElementById('fibLow').addEventListener('change', refreshFibRay);
+		document.getElementById('fibHigh').addEventListener('change', refreshFibRay);
 		function refreshMarkers() {
 			const showDots = document.getElementById('toggleDots').checked;
 			const showExtrema = document.getElementById('toggleExtrema').checked;
