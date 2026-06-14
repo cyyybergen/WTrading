@@ -377,6 +377,7 @@
 			borderDownColor: COLORS.red,
 			wickUpColor: COLORS.greenSoft,
 			wickDownColor: COLORS.red,
+			priceFormat: { type: 'price', precision: 4, minMove: 0.0001 },
 		});
 		candleSeries.setData(candles);
 
