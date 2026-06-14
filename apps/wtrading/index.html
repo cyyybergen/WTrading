@@ -59,6 +59,28 @@
 						<span class="track"></span>
 						<span class="toggle-label">Hoch/Tief (f′=0)</span>
 					</label>
+					<label class="win-toggle">
+						<input type="checkbox" id="toggleGrid" checked>
+						<span class="track"></span>
+						<span class="toggle-label">Grid</span>
+					</label>
+					<label class="win-toggle">
+						<input type="checkbox" id="toggleLeftScale">
+						<span class="track"></span>
+						<span class="toggle-label">Linke Skala</span>
+					</label>
+					<label class="win-toggle">
+						<input type="checkbox" id="togglePriceLabels">
+						<span class="track"></span>
+						<span class="toggle-label">Preis-Labels</span>
+					</label>
+					<label class="win-select">
+						<span class="toggle-label">Crosshair</span>
+						<select id="crosshairMode">
+							<option value="magnet" selected>Magnet</option>
+							<option value="normal">Normal</option>
+						</select>
+					</label>
 				</div>
 			</div>
 			<div id="chart" class="chart-host"></div>
@@ -89,28 +111,28 @@
 			<div class="formula-card acrylic accent-orange">
 				<span class="formula-index">4</span>
 				<div>
-					<h3>Differentialquotient t1</h3>
+					<h3>Differentialquotient t2 (≈ 1)</h3>
 					<output id="f4">–</output>
 				</div>
 			</div>
 			<div class="formula-card acrylic accent-blue">
 				<span class="formula-index">5</span>
 				<div>
-					<h3>Differentialquotient ⅓ Weg</h3>
+					<h3>Differentialquotient t3 (≈ -1/+1)</h3>
 					<output id="f5">–</output>
 				</div>
 			</div>
 			<div class="formula-card acrylic accent-orange">
 				<span class="formula-index">6</span>
 				<div>
-					<h3>Differentialquotient 0.09</h3>
+					<h3>Differentialquotient t4 (≈ 0)</h3>
 					<output id="f6">–</output>
 				</div>
 			</div>
 			<div class="formula-card acrylic accent-green">
 				<span class="formula-index">7</span>
 				<div>
-					<h3>Hoch/Tief-Marker (f′ = 0)</h3>
+					<h3>Zyklus-Phase</h3>
 					<output id="f7">–</output>
 				</div>
 			</div>
