@@ -300,8 +300,11 @@
 	// highSel provides the end anchor (high price). The slope is extrapolated to the last candle.
 	function buildRayData(candles, lowSel, highSel, result) {
 		const tMap = { t0: result.t0, t1: result.t1, t2: result.t2, t3: result.t3, t4: result.t4 };
-		const startTIdx = lowSel === 'auto' ? result.t0 : (tMap[lowSel] !== undefined ? tMap[lowSel] : result.t0);
-		const endTIdx = highSel === 'auto' ? result.t1 : (tMap[highSel] !== undefined ? tMap[highSel] : result.t1);
+		function resolveIdx(sel, fallback) {
+			return sel === 'auto' || tMap[sel] === undefined ? fallback : tMap[sel];
+		}
+		const startTIdx = resolveIdx(lowSel, result.t0);
+		const endTIdx = resolveIdx(highSel, result.t1);
 		const lowCandle = candleForSel(lowSel, result);
 		const highCandle = candleForSel(highSel, result);
 		const startPrice = lowCandle ? lowCandle.low : result.rayStartPrice;
